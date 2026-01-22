@@ -1,36 +1,107 @@
 import { motion } from "framer-motion";
 import { useCartStore } from "../stores/useCartStore";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { MoveRight } from "lucide-react";
-import { loadStripe } from "@stripe/stripe-js";
 import axios from "../lib/axios";
-
-const stripePromise = loadStripe(
-    "pk_test_51KZYccCoOZF2UhtOwdXQl3vcizup20zqKqT9hVUIsVzsdBrhqbUI2fE0ZdEVLdZfeHjeyFXtqaNsyCJCmZWnjNZa00PzMAjlcL"
-);
+import { toast } from "react-hot-toast";
 
 const OrderSummary = () => {
-    const { total, subtotal, coupon, isCouponApplied, cart } = useCartStore();
+    const { total, subtotal, coupon, isCouponApplied, cart, clearCart } = useCartStore();
+    const navigate = useNavigate();
 
     const savings = subtotal - total;
     const formattedSubtotal = subtotal.toFixed(2);
     const formattedTotal = total.toFixed(2);
     const formattedSavings = savings.toFixed(2);
 
+    const loadScript = (src) => {
+        return new Promise((resolve) => {
+            const script = document.createElement("script");
+            script.src = src;
+            script.onload = () => {
+                resolve(true);
+            };
+            script.onerror = () => {
+                resolve(false);
+            };
+            document.body.appendChild(script);
+        });
+    };
+
+    const displayRazorpay = async (amount) => {
+        const res = await loadScript("https://checkout.razorpay.com/v1/checkout.js");
+
+        if (!res) {
+            toast.error("Razorpay SDK failed to load. Are you online?");
+            return;
+        }
+
+        // Get Razorpay key from backend
+        const keyResponse = await axios.get("/payments/get-key");
+        const { key } = keyResponse.data;
+
+        // Create order
+        const orderResponse = await axios.post("/payments/create-order", {
+            amount: amount,
+            currency: "INR",
+            receipt: `receipt_${Date.now()}`,
+        });
+
+        const { order } = orderResponse.data;
+
+        const options = {
+            key: key,
+            amount: order.amount,
+            currency: order.currency,
+            name: "E-Commerce Store",
+            description: "Payment for your order",
+            order_id: order.id,
+            handler: async function (response) {
+                try {
+                    // Verify payment
+                    const verifyResponse = await axios.post("/payments/verify-payment", {
+                        razorpay_order_id: response.razorpay_order_id,
+                        razorpay_payment_id: response.razorpay_payment_id,
+                        razorpay_signature: response.razorpay_signature,
+                    });
+
+                    if (verifyResponse.data.success) {
+                        toast.success("Payment successful!");
+                        clearCart();
+                        navigate("/purchase-success");
+                    } else {
+                        toast.error("Payment verification failed");
+                        navigate("/purchase-cancel");
+                    }
+                } catch (error) {
+                    console.error("Payment verification error:", error);
+                    toast.error("Payment verification failed");
+                    navigate("/purchase-cancel");
+                }
+            },
+            prefill: {
+                name: "Customer Name",
+                email: "customer@example.com",
+                contact: "9999999999",
+            },
+            notes: {
+                address: "Razorpay Corporate Office",
+            },
+            theme: {
+                color: "#059669",
+            },
+        };
+
+        const paymentObject = new window.Razorpay(options);
+        paymentObject.open();
+    };
+
     const handlePayment = async () => {
-        const stripe = await stripePromise;
-        const res = await axios.post("/payments/create-checkout-session", {
-            products: cart,
-            couponCode: coupon ? coupon.code : null,
-        });
-
-        const session = res.data;
-        const result = await stripe.redirectToCheckout({
-            sessionId: session.id,
-        });
-
-        if (result.error) {
-            console.error("Error:", result.error);
+        try {
+            await displayRazorpay(total);
+        } catch (error) {
+            console.error("Payment error:", error);
+            toast.error("Payment failed. Please try again.");
         }
     };
 
